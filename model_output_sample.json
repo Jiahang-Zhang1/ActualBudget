@@ -1,0 +1,19 @@
+{
+  "predicted_category_id": "coffee",
+  "confidence": 0.82,
+  "top_categories": [
+    {
+      "category_id": "coffee",
+      "score": 0.82
+    },
+    {
+      "category_id": "restaurants",
+      "score": 0.11
+    },
+    {
+      "category_id": "groceries",
+      "score": 0.07
+    }
+  ],
+  "model_version": "v1"
+}
