@@ -1,0 +1,9 @@
+{
+  "transaction_id": "txn_001",
+  "payee": "STARBUCKS 1458",
+  "imported_description": "STARBUCKS STORE 1458 NEW YORK NY",
+  "notes": "",
+  "amount": -6.45,
+  "date": "2026-03-01",
+  "account_type": "checking"
+}
