@@ -1,0 +1,44 @@
+project_name: actual-budget-transaction-classifier
+
+data:
+  path: /app/data/transactions.csv
+  label_col: category_id
+  date_col: date
+  text_cols:
+    - payee
+    - imported_description
+    - notes
+  categorical_cols:
+    - account_type
+  numeric_cols:
+    - amount
+
+split:
+  train_frac: 0.70
+  val_frac: 0.15
+
+features:
+  word_ngram_range: [1, 2]
+  word_max_features: 30000
+  word_min_df: 2
+  use_char_tfidf: false
+  char_ngram_range: [3, 5]
+  char_max_features: 10000
+  char_min_df: 2
+
+model:
+  classifier: linearsvc
+  C: 1.0
+  max_iter: 3000
+  class_weight: balanced
+  random_state: 42
+
+eval:
+  top_k: 3
+
+mlflow:
+  experiment_name: actual-txn-classifier
+  run_name: v2_tfidf_linearsvc
+
+output:
+  dir: /app/outputs
