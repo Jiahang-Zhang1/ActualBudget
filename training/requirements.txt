@@ -4,3 +4,4 @@ scikit-learn==1.5.1
 mlflow==2.16.2
 PyYAML==6.0.2
 joblib==1.4.2
+psutil
