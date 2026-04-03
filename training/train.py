@@ -17,8 +17,9 @@ from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.metrics import accuracy_score, classification_report, f1_score
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder
 from sklearn.svm import LinearSVC
 
 
@@ -49,10 +50,9 @@ def get_git_sha() -> str:
 
 def get_gpu_info() -> str:
     try:
-        out = subprocess.check_output(
+        return subprocess.check_output(
             ["nvidia-smi"], stderr=subprocess.STDOUT
         ).decode("utf-8")
-        return out
     except Exception:
         return "No GPU or nvidia-smi not available."
 
@@ -62,7 +62,6 @@ def prepare_dataframe(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
     data_cfg = cfg["data"]
     label_col = data_cfg["label_col"]
-    date_col = data_cfg["date_col"]
     text_cols = data_cfg.get("text_cols", [])
     categorical_cols = data_cfg.get("categorical_cols", [])
     numeric_cols = data_cfg.get("numeric_cols", [])
@@ -70,46 +69,78 @@ def prepare_dataframe(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if label_col not in df.columns:
         raise ValueError(f"Missing label column: {label_col}")
 
-    if date_col not in df.columns:
-        raise ValueError(f"Missing date column: {date_col}")
-
     for col in text_cols:
         if col not in df.columns:
             df[col] = ""
-        df[col] = df[col].fillna("").astype(str)
+        df[col] = df[col].fillna("").astype(str).str.strip()
 
     for col in categorical_cols:
         if col not in df.columns:
             df[col] = "unknown"
-        df[col] = df[col].fillna("unknown").astype(str)
+        df[col] = df[col].fillna("unknown").astype(str).str.strip()
 
     for col in numeric_cols:
         if col not in df.columns:
             df[col] = 0.0
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    df = df.dropna(subset=[label_col, date_col]).reset_index(drop=True)
+    df[label_col] = df[label_col].astype(str).str.strip()
+    df = df[df[label_col] != ""].reset_index(drop=True)
 
-    df["month"] = df[date_col].dt.month.astype("int16")
-    df["dayofweek"] = df[date_col].dt.dayofweek.astype("int16")
+    # 去掉完全空的文本样本
+    if text_cols:
+        combined_text = df[text_cols].fillna("").astype(str).agg(" ".join, axis=1).str.strip()
+        df = df[combined_text != ""].reset_index(drop=True)
 
-    df[label_col] = df[label_col].astype(str)
     return df
 
 
-def chronological_split(df: pd.DataFrame, date_col: str, train_frac: float, val_frac: float):
-    df = df.sort_values(date_col).reset_index(drop=True)
-    n = len(df)
+def filter_rare_classes(df: pd.DataFrame, label_col: str, min_examples_per_class: int):
+    class_counts = df[label_col].value_counts()
+    keep_labels = class_counts[class_counts >= min_examples_per_class].index
+    filtered_df = df[df[label_col].isin(keep_labels)].reset_index(drop=True)
+    dropped = int(len(df) - len(filtered_df))
+    return filtered_df, dropped
 
-    train_end = int(n * train_frac)
-    val_end = int(n * (train_frac + val_frac))
 
-    train_df = df.iloc[:train_end].copy()
-    val_df = df.iloc[train_end:val_end].copy()
-    test_df = df.iloc[val_end:].copy()
+def random_split(df: pd.DataFrame, label_col: str, cfg: dict):
+    split_cfg = cfg["split"]
+    train_frac = float(split_cfg["train_frac"])
+    val_frac = float(split_cfg["val_frac"])
+    random_state = int(split_cfg.get("random_state", 42))
+    stratify_enabled = bool(split_cfg.get("stratify", True))
 
-    return train_df, val_df, test_df
+    if train_frac <= 0 or val_frac <= 0 or (train_frac + val_frac) >= 1:
+        raise ValueError("Split fractions must satisfy 0 < train_frac, val_frac and train_frac + val_frac < 1")
+
+    test_frac = 1.0 - train_frac - val_frac
+
+    y = df[label_col]
+    stratify_y = y if stratify_enabled else None
+
+    train_df, temp_df = train_test_split(
+        df,
+        test_size=(1.0 - train_frac),
+        random_state=random_state,
+        stratify=stratify_y,
+    )
+
+    temp_relative_val_frac = val_frac / (val_frac + test_frac)
+    temp_y = temp_df[label_col]
+    stratify_temp_y = temp_y if stratify_enabled else None
+
+    val_df, test_df = train_test_split(
+        temp_df,
+        test_size=(1.0 - temp_relative_val_frac),
+        random_state=random_state,
+        stratify=stratify_temp_y,
+    )
+
+    return (
+        train_df.reset_index(drop=True),
+        val_df.reset_index(drop=True),
+        test_df.reset_index(drop=True),
+    )
 
 
 def build_classifier(model_cfg: dict):
@@ -152,7 +183,7 @@ def build_pipeline(cfg: dict) -> Pipeline:
 
     text_cols = data_cfg.get("text_cols", [])
     categorical_cols = data_cfg.get("categorical_cols", [])
-    numeric_cols = list(data_cfg.get("numeric_cols", [])) + ["month", "dayofweek"]
+    numeric_cols = data_cfg.get("numeric_cols", [])
 
     transformers = []
 
@@ -207,13 +238,7 @@ def build_pipeline(cfg: dict) -> Pipeline:
         )
 
     if numeric_cols:
-        transformers.append(
-            (
-                "numeric",
-                StandardScaler(with_mean=False),
-                numeric_cols,
-            )
-        )
+        transformers.append(("numeric", "passthrough", numeric_cols))
 
     preprocessor = ColumnTransformer(
         transformers=transformers,
@@ -223,13 +248,12 @@ def build_pipeline(cfg: dict) -> Pipeline:
 
     clf = build_classifier(model_cfg)
 
-    pipeline = Pipeline(
+    return Pipeline(
         steps=[
             ("preprocessor", preprocessor),
             ("clf", clf),
         ]
     )
-    return pipeline
 
 
 def get_score_matrix(pipeline: Pipeline, X: pd.DataFrame) -> np.ndarray:
@@ -242,7 +266,6 @@ def get_score_matrix(pipeline: Pipeline, X: pd.DataFrame) -> np.ndarray:
     if hasattr(pipeline, "decision_function"):
         scores = pipeline.decision_function(X)
         if scores.ndim == 1:
-            # Binary classification fallback
             scores = np.column_stack([-scores, scores])
         return scores
 
@@ -296,21 +319,23 @@ def main():
     output_dir = Path(cfg["output"]["dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    data_path = cfg["data"]["path"]
-    df = pd.read_csv(data_path)
+    df = pd.read_csv(cfg["data"]["path"])
     df = prepare_dataframe(df, cfg)
 
     label_col = cfg["data"]["label_col"]
-    date_col = cfg["data"]["date_col"]
     top_k = int(cfg["eval"].get("top_k", 3))
+    min_examples_per_class = int(cfg["split"].get("min_examples_per_class", 2))
 
-    train_frac = float(cfg["split"]["train_frac"])
-    val_frac = float(cfg["split"]["val_frac"])
+    original_rows = len(df)
+    df, dropped_rare = filter_rare_classes(df, label_col, min_examples_per_class)
 
-    train_df, val_df, test_df = chronological_split(df, date_col, train_frac, val_frac)
+    if len(df) == 0:
+        raise ValueError("No data left after filtering rare classes.")
+
+    train_df, val_df, test_df = random_split(df, label_col, cfg)
 
     if len(train_df) == 0 or len(val_df) == 0 or len(test_df) == 0:
-        raise ValueError("One of train/val/test splits is empty. Check your dataset size or split ratios.")
+        raise ValueError("One of train/val/test splits is empty. Check dataset size or split ratios.")
 
     X_train = train_df.drop(columns=[label_col])
     y_train = train_df[label_col]
@@ -336,6 +361,9 @@ def main():
             }
         )
 
+        mlflow.log_param("original_rows", original_rows)
+        mlflow.log_param("rows_after_filtering", len(df))
+        mlflow.log_param("dropped_rare_class_rows", dropped_rare)
         mlflow.log_param("train_rows", len(train_df))
         mlflow.log_param("val_rows", len(val_df))
         mlflow.log_param("test_rows", len(test_df))
