@@ -1,19 +1,10 @@
 {
-  "predicted_category_id": "coffee",
+  "predicted_category_id": "Food & Dining",
   "confidence": 0.82,
   "top_categories": [
-    {
-      "category_id": "coffee",
-      "score": 0.82
-    },
-    {
-      "category_id": "restaurants",
-      "score": 0.11
-    },
-    {
-      "category_id": "groceries",
-      "score": 0.07
-    }
+    {"category_id": "Food & Dining", "score": 0.82},
+    {"category_id": "Shopping & Retail", "score": 0.11},
+    {"category_id": "Entertainment & Recreation", "score": 0.07}
   ],
   "model_version": "v1"
 }
