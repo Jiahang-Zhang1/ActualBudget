@@ -2,20 +2,20 @@ project_name: actual-budget-transaction-classifier
 
 data:
   path: /app/data/transactions.csv
-  label_col: category_id
-  date_col: date
+  label_col: category
   text_cols:
-    - payee
-    - imported_description
-    - notes
+    - transaction_description
   categorical_cols:
-    - account_type
-  numeric_cols:
-    - amount
+    - country
+    - currency
+  numeric_cols: []
 
 split:
   train_frac: 0.70
   val_frac: 0.15
+  random_state: 42
+  stratify: true
+  min_examples_per_class: 2
 
 features:
   word_ngram_range: [1, 2]
