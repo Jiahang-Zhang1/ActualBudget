@@ -1,0 +1,22 @@
+volumes:
+  mycsv:
+    external: true
+
+services:
+  init-data:
+    image: python:3.11
+    volumes:
+      - mycsv:/data
+    working_dir: /data
+    command:
+      - bash
+      - -c
+      - |
+        pip install -q gdown pandas
+        gdown --id 16_xFZ9GUvcJjsN7U_AB6yz2EZ4zbp2Rm -O /data/mydata.csv
+        python3 - <<EOF
+        import pandas as pd
+        df = pd.read_csv("/data/mydata.csv")
+        print(df.shape)
+        EOF
+    restart: "no"
