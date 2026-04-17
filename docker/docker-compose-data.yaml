@@ -13,7 +13,7 @@ services:
       - -c
       - |
         pip install -q gdown pandas
-        gdown --id 16_xFZ9GUvcJjsN7U_AB6yz2EZ4zbp2Rm -O /data/mydata.csv
+        gdown 'https://drive.google.com/file/d/16_xFZ9GUvcJjsN7U_AB6yz2EZ4zbp2Rm/view?usp=sharing' -O /data/mydata.csv
         python3 - <<EOF
         import pandas as pd
         df = pd.read_csv("/data/mydata.csv")
