@@ -319,7 +319,11 @@ def main():
     output_dir = Path(cfg["output"]["dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    df = pd.read_csv(cfg["data"]["path"])
+    data_path = cfg["data"]["path"]
+if data_path.endswith(".parquet"):
+    df = pd.read_parquet(data_path)
+else:
+    df = pd.read_csv(data_path)
     df = prepare_dataframe(df, cfg)
 
     label_col = cfg["data"]["label_col"]
