@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -7,6 +9,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import joblib
 import mlflow
@@ -28,8 +31,8 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def flatten_dict(d, parent_key="", sep="."):
-    items = {}
+def flatten_dict(d: dict, parent_key: str = "", sep: str = ".") -> dict[str, Any]:
+    items: dict[str, Any] = {}
     for k, v in d.items():
         new_key = f"{parent_key}{sep}{k}" if parent_key else str(k)
         if isinstance(v, dict):
@@ -41,9 +44,13 @@ def flatten_dict(d, parent_key="", sep="."):
 
 def get_git_sha() -> str:
     try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
-        ).decode("utf-8").strip()
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+            )
+            .decode("utf-8")
+            .strip()
+        )
     except Exception:
         return os.environ.get("GIT_SHA", "unknown")
 
@@ -59,7 +66,6 @@ def get_gpu_info() -> str:
 
 def prepare_dataframe(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df = df.copy()
-
     data_cfg = cfg["data"]
     label_col = data_cfg["label_col"]
     text_cols = data_cfg.get("text_cols", [])
@@ -87,7 +93,7 @@ def prepare_dataframe(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     df[label_col] = df[label_col].astype(str).str.strip()
     df = df[df[label_col] != ""].reset_index(drop=True)
 
-    # 去掉完全空的文本样本
+    # 去掉文本完全为空的样本
     if text_cols:
         combined_text = df[text_cols].fillna("").astype(str).agg(" ".join, axis=1).str.strip()
         df = df[combined_text != ""].reset_index(drop=True)
@@ -95,7 +101,9 @@ def prepare_dataframe(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     return df
 
 
-def filter_rare_classes(df: pd.DataFrame, label_col: str, min_examples_per_class: int):
+def filter_rare_classes(
+    df: pd.DataFrame, label_col: str, min_examples_per_class: int
+) -> tuple[pd.DataFrame, int]:
     class_counts = df[label_col].value_counts()
     keep_labels = class_counts[class_counts >= min_examples_per_class].index
     filtered_df = df[df[label_col].isin(keep_labels)].reset_index(drop=True)
@@ -111,10 +119,11 @@ def random_split(df: pd.DataFrame, label_col: str, cfg: dict):
     stratify_enabled = bool(split_cfg.get("stratify", True))
 
     if train_frac <= 0 or val_frac <= 0 or (train_frac + val_frac) >= 1:
-        raise ValueError("Split fractions must satisfy 0 < train_frac, val_frac and train_frac + val_frac < 1")
+        raise ValueError(
+            "Split fractions must satisfy 0 < train_frac, val_frac and train_frac + val_frac < 1"
+        )
 
     test_frac = 1.0 - train_frac - val_frac
-
     y = df[label_col]
     stratify_y = y if stratify_enabled else None
 
@@ -143,20 +152,55 @@ def random_split(df: pd.DataFrame, label_col: str, cfg: dict):
     )
 
 
-def build_classifier(model_cfg: dict):
-    clf_name = model_cfg["classifier"].lower()
-    class_weight = model_cfg.get("class_weight", None)
-    random_state = model_cfg.get("random_state", 42)
+def _get_text_feature_cfg(cfg: dict) -> dict:
+    # 兼容你原来仓库的旧结构和我前面给你的新结构
+    features_cfg = cfg.get("features", {})
+    if "text" in features_cfg:
+        return features_cfg["text"]
+    return {
+        "ngram_range": features_cfg.get("word_ngram_range", [1, 2]),
+        "max_features": features_cfg.get("word_max_features", 20000),
+        "min_df": features_cfg.get("word_min_df", 2),
+        "max_df": 1.0,
+        "lowercase": True,
+        "strip_accents": "unicode",
+        "use_char_tfidf": features_cfg.get("use_char_tfidf", False),
+        "char_ngram_range": features_cfg.get("char_ngram_range", [3, 5]),
+        "char_max_features": features_cfg.get("char_max_features", 10000),
+        "char_min_df": features_cfg.get("char_min_df", 2),
+    }
 
-    if clf_name == "logreg":
+
+def _get_categorical_feature_cfg(cfg: dict) -> dict:
+    features_cfg = cfg.get("features", {})
+    if "categorical" in features_cfg:
+        return features_cfg["categorical"]
+    return {"handle_unknown": "ignore"}
+
+
+def build_classifier(model_cfg: dict):
+    # 兼容旧版 classifier/logreg 和新版 type/logistic_regression
+    clf_name = (
+        model_cfg.get("type")
+        or model_cfg.get("classifier")
+        or "logistic_regression"
+    )
+    clf_name = str(clf_name).lower()
+
+    class_weight = model_cfg.get("class_weight", None)
+    random_state = int(model_cfg.get("random_state", 42))
+
+    if clf_name in {"logistic_regression", "logreg"}:
         return LogisticRegression(
             C=float(model_cfg.get("C", 1.0)),
             max_iter=int(model_cfg.get("max_iter", 1000)),
             class_weight=class_weight,
             random_state=random_state,
+            solver=model_cfg.get("solver", "lbfgs"),
+            multi_class=model_cfg.get("multi_class", "auto"),
         )
 
-    if clf_name == "linearsvc":
+    if clf_name in {"linearsvc", "linear_svc"}:
         return LinearSVC(
             C=float(model_cfg.get("C", 1.0)),
             max_iter=int(model_cfg.get("max_iter", 3000)),
@@ -164,7 +208,7 @@ def build_classifier(model_cfg: dict):
             random_state=random_state,
         )
 
-    if clf_name == "sgd":
+    if clf_name in {"sgd", "sgdclassifier"}:
         return SGDClassifier(
             loss="log_loss",
             alpha=float(model_cfg.get("alpha", 0.0001)),
@@ -178,7 +222,8 @@ def build_classifier(model_cfg: dict):
 
 def build_pipeline(cfg: dict) -> Pipeline:
     data_cfg = cfg["data"]
-    feat_cfg = cfg["features"]
+    text_feat_cfg = _get_text_feature_cfg(cfg)
+    categorical_feat_cfg = _get_categorical_feature_cfg(cfg)
     model_cfg = cfg["model"]
 
     text_cols = data_cfg.get("text_cols", [])
@@ -187,25 +232,29 @@ def build_pipeline(cfg: dict) -> Pipeline:
 
     transformers = []
 
-    word_ngram_range = tuple(feat_cfg.get("word_ngram_range", [1, 2]))
-    word_max_features = int(feat_cfg.get("word_max_features", 20000))
-    word_min_df = int(feat_cfg.get("word_min_df", 2))
+    word_ngram_range = tuple(text_feat_cfg.get("ngram_range", [1, 2]))
+    word_max_features = int(text_feat_cfg.get("max_features", 20000))
+    word_min_df = text_feat_cfg.get("min_df", 1)
+    word_max_df = text_feat_cfg.get("max_df", 1.0)
+    lowercase = bool(text_feat_cfg.get("lowercase", True))
+    strip_accents = text_feat_cfg.get("strip_accents", "unicode")
 
-    use_char_tfidf = bool(feat_cfg.get("use_char_tfidf", False))
-    char_ngram_range = tuple(feat_cfg.get("char_ngram_range", [3, 5]))
-    char_max_features = int(feat_cfg.get("char_max_features", 10000))
-    char_min_df = int(feat_cfg.get("char_min_df", 2))
+    use_char_tfidf = bool(text_feat_cfg.get("use_char_tfidf", False))
+    char_ngram_range = tuple(text_feat_cfg.get("char_ngram_range", [3, 5]))
+    char_max_features = int(text_feat_cfg.get("char_max_features", 10000))
+    char_min_df = text_feat_cfg.get("char_min_df", 2)
 
     for col in text_cols:
         transformers.append(
             (
                 f"{col}_word_tfidf",
                 TfidfVectorizer(
-                    lowercase=True,
-                    strip_accents="unicode",
+                    lowercase=lowercase,
+                    strip_accents=strip_accents,
                     ngram_range=word_ngram_range,
                     max_features=word_max_features,
                     min_df=word_min_df,
+                    max_df=word_max_df,
                     sublinear_tf=True,
                 ),
                 col,
@@ -218,7 +267,7 @@ def build_pipeline(cfg: dict) -> Pipeline:
                     f"{col}_char_tfidf",
                     TfidfVectorizer(
                         analyzer="char_wb",
-                        lowercase=True,
+                        lowercase=lowercase,
                         ngram_range=char_ngram_range,
                         max_features=char_max_features,
                         min_df=char_min_df,
@@ -232,7 +281,9 @@ def build_pipeline(cfg: dict) -> Pipeline:
         transformers.append(
             (
                 "categorical",
-                OneHotEncoder(handle_unknown="ignore"),
+                OneHotEncoder(
+                    handle_unknown=categorical_feat_cfg.get("handle_unknown", "ignore")
+                ),
                 categorical_cols,
             )
         )
@@ -278,7 +329,7 @@ def get_score_matrix(pipeline: Pipeline, X: pd.DataFrame) -> np.ndarray:
     return scores
 
 
-def top_k_accuracy(y_true, classes, scores, k=3) -> float:
+def top_k_accuracy(y_true: pd.Series, classes: np.ndarray, scores: np.ndarray, k: int = 3) -> float:
     k = min(k, len(classes))
     topk_idx = np.argsort(scores, axis=1)[:, -k:]
     topk_labels = classes[topk_idx]
@@ -286,19 +337,90 @@ def top_k_accuracy(y_true, classes, scores, k=3) -> float:
     return float(np.mean(hits))
 
 
-def evaluate_split(name: str, pipeline: Pipeline, X: pd.DataFrame, y: pd.Series, top_k: int):
+def precision_at_confidence(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    top1_scores: np.ndarray,
+    threshold: float,
+) -> float | None:
+    mask = top1_scores >= threshold
+    if int(mask.sum()) == 0:
+        return None
+    return float((y_true[mask] == y_pred[mask]).mean())
+
+
+def build_prediction_frame(
+    split_name: str,
+    X: pd.DataFrame,
+    y: pd.Series,
+    preds: np.ndarray,
+    scores: np.ndarray,
+    classes: np.ndarray,
+) -> pd.DataFrame:
+    top3_idx = np.argsort(scores, axis=1)[:, -3:]
+    top3_labels = classes[top3_idx]
+    top1_scores = scores.max(axis=1)
+
+    frame = X.copy()
+    frame["split"] = split_name
+    frame["y_true"] = y.values
+    frame["y_pred"] = preds
+    frame["top1_score"] = top1_scores
+    frame["top3_labels"] = [json.dumps(list(row)) for row in top3_labels]
+    return frame
+
+
+def evaluate_split(
+    name: str,
+    pipeline: Pipeline,
+    X: pd.DataFrame,
+    y: pd.Series,
+    top_k: int,
+    high_conf_threshold: float,
+):
     preds = pipeline.predict(X)
     scores = get_score_matrix(pipeline, X)
     classes = pipeline.named_steps["clf"].classes_
+    top1_scores = scores.max(axis=1)
 
     metrics = {
-        f"{name}_accuracy": float(accuracy_score(y, preds)),
+        f"{name}_top1_accuracy": float(accuracy_score(y, preds)),
         f"{name}_macro_f1": float(f1_score(y, preds, average="macro", zero_division=0)),
+        f"{name}_weighted_f1": float(
+            f1_score(y, preds, average="weighted", zero_division=0)
+        ),
         f"{name}_top{top_k}_accuracy": float(top_k_accuracy(y, classes, scores, top_k)),
     }
 
+    high_conf = precision_at_confidence(
+        y.to_numpy(),
+        preds,
+        top1_scores,
+        high_conf_threshold,
+    )
+    metrics[f"{name}_high_confidence_precision"] = (
+        float(high_conf) if high_conf is not None else -1.0
+    )
+    metrics[f"{name}_high_confidence_count"] = int(
+        (top1_scores >= high_conf_threshold).sum()
+    )
+    metrics[f"{name}_high_confidence_threshold"] = float(high_conf_threshold)
+
     report = classification_report(y, preds, zero_division=0, output_dict=True)
-    return metrics, report
+    prediction_frame = build_prediction_frame(name, X, y, preds, scores, classes)
+
+    return metrics, report, prediction_frame
+
+
+def ensure_output_dir(cfg: dict) -> Path:
+    output_dir = Path(cfg["output"]["dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def save_json(path: Path, payload: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
 def main():
@@ -316,18 +438,18 @@ def main():
     run_name = cfg["mlflow"].get("run_name", Path(args.config).stem)
     mlflow.set_experiment(experiment_name)
 
-    output_dir = Path(cfg["output"]["dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = ensure_output_dir(cfg)
 
     data_path = cfg["data"]["path"]
-if data_path.endswith(".parquet"):
-    df = pd.read_parquet(data_path)
-else:
-    df = pd.read_csv(data_path)
-    df = prepare_dataframe(df, cfg)
+    if data_path.endswith(".parquet"):
+        df = pd.read_parquet(data_path)
+    else:
+        df = pd.read_csv(data_path)
 
+    df = prepare_dataframe(df, cfg)
     label_col = cfg["data"]["label_col"]
     top_k = int(cfg["eval"].get("top_k", 3))
+    high_conf_threshold = float(cfg["eval"].get("high_conf_threshold", 0.90))
     min_examples_per_class = int(cfg["split"].get("min_examples_per_class", 2))
 
     original_rows = len(df)
@@ -356,12 +478,17 @@ else:
 
     with mlflow.start_run(run_name=run_name, log_system_metrics=True):
         mlflow.log_params(flatten_dict(cfg))
+
         mlflow.set_tags(
             {
                 "git_sha": get_git_sha(),
                 "python_version": sys.version.split()[0],
                 "platform": platform.platform(),
-                "project_name": cfg.get("project_name", "unknown"),
+                "project_name": cfg.get("project_name", "actual-budget-transaction-classifier"),
+                "stage": "training",
+                "task": "transaction-category-suggestion",
+                "label_space": "model_labels",
+                "mapped_label_space": "actual_budget_categories",
             }
         )
 
@@ -371,16 +498,33 @@ else:
         mlflow.log_param("train_rows", len(train_df))
         mlflow.log_param("val_rows", len(val_df))
         mlflow.log_param("test_rows", len(test_df))
-        mlflow.log_param("num_classes", y_train.nunique())
+        mlflow.log_param("num_classes", int(y_train.nunique()))
+
+        class_distribution = y_train.value_counts().to_dict()
+        class_distribution_path = output_dir / f"{run_name}_train_class_distribution.json"
+        save_json(class_distribution_path, class_distribution)
 
         pipeline.fit(X_train, y_train)
-
         train_wall_sec = time.time() - start_time
 
-        val_metrics, val_report = evaluate_split("val", pipeline, X_val, y_val, top_k)
-        test_metrics, test_report = evaluate_split("test", pipeline, X_test, y_test, top_k)
+        val_metrics, val_report, val_predictions = evaluate_split(
+            "val",
+            pipeline,
+            X_val,
+            y_val,
+            top_k,
+            high_conf_threshold,
+        )
+        test_metrics, test_report, test_predictions = evaluate_split(
+            "test",
+            pipeline,
+            X_test,
+            y_test,
+            top_k,
+            high_conf_threshold,
+        )
 
-        all_metrics = {}
+        all_metrics: dict[str, float] = {}
         all_metrics.update(val_metrics)
         all_metrics.update(test_metrics)
         all_metrics["train_wall_sec"] = float(train_wall_sec)
@@ -391,16 +535,20 @@ else:
         val_report_path = output_dir / f"{run_name}_val_report.json"
         summary_path = output_dir / f"{run_name}_summary.json"
         gpu_info_path = output_dir / f"{run_name}_gpu_info.txt"
+        val_preds_path = output_dir / f"{run_name}_val_predictions.csv"
+        test_preds_path = output_dir / f"{run_name}_test_predictions.csv"
+        metadata_path = output_dir / f"{run_name}_metadata.json"
 
         joblib.dump(pipeline, model_path)
+
         with open(config_copy_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(cfg, f, sort_keys=False)
+            yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
 
-        with open(val_report_path, "w", encoding="utf-8") as f:
-            json.dump(val_report, f, indent=2)
+        save_json(val_report_path, val_report)
+        save_json(test_report_path, test_report)
 
-        with open(test_report_path, "w", encoding="utf-8") as f:
-            json.dump(test_report, f, indent=2)
+        val_predictions.to_csv(val_preds_path, index=False)
+        test_predictions.to_csv(test_preds_path, index=False)
 
         model_size_mb = model_path.stat().st_size / (1024 * 1024)
         peak_ram_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
@@ -408,8 +556,22 @@ else:
         all_metrics["model_size_mb"] = float(model_size_mb)
         all_metrics["peak_ram_mb"] = float(peak_ram_mb)
 
-        with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(all_metrics, f, indent=2)
+        save_json(summary_path, all_metrics)
+
+        metadata = {
+            "run_name": run_name,
+            "experiment_name": experiment_name,
+            "label_col": label_col,
+            "classes": sorted([str(c) for c in y_train.unique()]),
+            "top_k": top_k,
+            "high_conf_threshold": high_conf_threshold,
+            "train_rows": len(train_df),
+            "val_rows": len(val_df),
+            "test_rows": len(test_df),
+            "model_path": str(model_path),
+            "git_sha": get_git_sha(),
+        }
+        save_json(metadata_path, metadata)
 
         with open(gpu_info_path, "w", encoding="utf-8") as f:
             f.write(get_gpu_info())
@@ -421,8 +583,22 @@ else:
         mlflow.log_artifact(str(test_report_path))
         mlflow.log_artifact(str(summary_path))
         mlflow.log_artifact(str(gpu_info_path))
+        mlflow.log_artifact(str(val_preds_path))
+        mlflow.log_artifact(str(test_preds_path))
+        mlflow.log_artifact(str(metadata_path))
+        mlflow.log_artifact(str(class_distribution_path))
 
-        print(json.dumps(all_metrics, indent=2))
+        print(json.dumps(all_metrics, indent=2, ensure_ascii=False))
+        print(f"Wrote: {model_path}")
+        print(f"Wrote: {config_copy_path}")
+        print(f"Wrote: {val_report_path}")
+        print(f"Wrote: {test_report_path}")
+        print(f"Wrote: {summary_path}")
+        print(f"Wrote: {gpu_info_path}")
+        print(f"Wrote: {val_preds_path}")
+        print(f"Wrote: {test_preds_path}")
+        print(f"Wrote: {metadata_path}")
+        print(f"Wrote: {class_distribution_path}")
 
 
 if __name__ == "__main__":
